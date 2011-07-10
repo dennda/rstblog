@@ -18,7 +18,7 @@ from jinja2 import contextfunction
 from werkzeug.routing import Rule, Map, NotFound
 from werkzeug.contrib.atom import AtomFeed
 
-from rstblog.signals import after_file_prepaired, \
+from rstblog.signals import after_file_published, \
      before_build_finished
 from rstblog.utils import Pagination
 
@@ -30,10 +30,12 @@ class MonthArchive(object):
         self.year = year
         self.month = month
         self.entries = entries
+        entries.sort(key=lambda x: x.pub_date, reverse=True)
 
     @property
     def month_name(self):
-        return self.builder.format_date(date(self.year, self.month, 1),
+        return self.builder.format_date(date(int(self.year),
+                                        int(self.month), 1),
                                         format='MMMM')
 
     @property
@@ -47,7 +49,7 @@ class YearArchive(object):
         self.year = year
         self.months = [MonthArchive(builder, year, month, entries)
                        for month, entries in months.iteritems()]
-        self.months.sort(key=lambda x: -x.month)
+        self.months.sort(key=lambda x: -int(x.month))
         self.count = sum(len(x.entries) for x in self.months)
 
 
@@ -73,7 +75,8 @@ def process_blog_entry(context):
     if context.pub_date is not None:
         context.builder.get_storage('blog') \
             .setdefault(context.pub_date.year, {}) \
-            .setdefault(context.pub_date.month, []).append(context)
+            .setdefault(('0%d' % context.pub_date.month)[-2:], []) \
+            .append(context)
 
 
 def get_all_entries(builder):
@@ -84,7 +87,8 @@ def get_all_entries(builder):
     for year, months in years:
         for month, contexts in months.iteritems():
             result.extend(contexts)
-    result.sort(key=lambda x: x.pub_date, reverse=True)
+    result.sort(key=lambda x: (x.pub_date, x.config.get('day-order', 0)),
+                reverse=True)
     return result
 
 
@@ -144,8 +148,10 @@ def write_archive_pages(builder):
 def write_feed(builder):
     blog_author = builder.config.root_get('author')
     url = builder.config.root_get('canonical_url') or 'http://localhost/'
-    feed = AtomFeed(u'Recent Blog Posts',
-                    subtitle=u'Recent blog posts',
+    name = builder.config.get('feed.name') or u'Recent Blog Posts'
+    subtitle = builder.config.get('feed.subtitle') or u'Recent blog posts'
+    feed = AtomFeed(name,
+                    subtitle=subtitle,
                     feed_url=urljoin(url, builder.link_to('blog_feed')),
                     url=url)
     for entry in get_all_entries(builder)[:10]:
@@ -164,7 +170,7 @@ def write_blog_files(builder):
 
 
 def setup(builder):
-    after_file_prepaired.connect(process_blog_entry)
+    after_file_published.connect(process_blog_entry)
     before_build_finished.connect(write_blog_files)
     builder.register_url('blog_index', config_key='modules.blog.index_url',
                          config_default='/', defaults={'page': 1})

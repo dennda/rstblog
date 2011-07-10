@@ -12,6 +12,7 @@ import re
 import os
 import posixpath
 from fnmatch import fnmatch
+from urlparse import urlparse
 
 from docutils.core import publish_parts
 
@@ -20,10 +21,12 @@ from jinja2 import Environment, FileSystemLoader, Markup
 from babel import Locale, dates
 
 from werkzeug.routing import Map, Rule
+from werkzeug import url_unquote
 
 from rstblog.signals import before_file_processed, \
      before_template_rendered, before_build_finished, \
-     before_file_built, after_file_prepaired
+     before_file_built, after_file_prepared, \
+     after_file_published
 from rstblog.modules import find_module
 from rstblog.programs import RSTProgram, CopyProgram
 
@@ -53,14 +56,22 @@ class Context(object):
             self.program_name = self.builder.guess_program(
                 config, source_filename)
         self.program = self.builder.programs[self.program_name](self)
-        self.destination_filename = self.program.get_desired_filename()
+        self.destination_filename = os.path.join(
+            self.builder.prefix_path.lstrip('/'),
+            self.program.get_desired_filename())
         if prepare:
             self.program.prepare()
-            after_file_prepaired.send(self)
+            after_file_prepared.send(self)
+            if self.public:
+                after_file_published.send(self)
 
     @property
     def is_new(self):
         return not os.path.exists(self.full_destination_filename)
+
+    @property
+    def public(self):
+        return self.config.get('public', True)
 
     @property
     def slug(self):
@@ -128,7 +139,7 @@ class Context(object):
                               writer_name='html4css1',
                               settings_overrides=settings)
         return {
-            'title':        parts['title'],
+            'title':        Markup(parts['title']).striptags(),
             'html_title':   Markup(parts['html_title']),
             'fragment':     Markup(parts['fragment'])
         }
@@ -145,7 +156,7 @@ class Context(object):
         if type is None:
             type = 'text/css'
         self.links.append({
-            'href':     '/' + posixpath.join(self.builder.static_folder, href),
+            'href':     self.builder.get_static_url(href),
             'type':     type,
             'media':    media,
             'rel':      'stylesheet'
@@ -180,7 +191,10 @@ class Builder(object):
         self.modules = []
         self.storage = {}
         self.url_map = Map()
-        self.url_adapter = self.url_map.bind('dummy.invalid')
+        parsed = urlparse(self.config.root_get('canonical_url'))
+        self.prefix_path = parsed.path
+        self.url_adapter = self.url_map.bind('dummy.invalid',
+            script_name=self.prefix_path)
         self.register_url('page', '/<path:slug>')
 
         template_path = os.path.join(self.project_folder,
@@ -217,7 +231,7 @@ class Builder(object):
         return self.url_adapter.build(_key, values)
 
     def get_link_filename(self, _key, **values):
-        link = self.link_to(_key, **values).lstrip('/')
+        link = url_unquote(self.link_to(_key, **values).lstrip('/')).encode('utf-8')
         if not link or link.endswith('/'):
             link += 'index.html'
         return os.path.join(self.default_output_folder, link)
@@ -235,9 +249,15 @@ class Builder(object):
             rule = self.config.root_get(config_key, config_default)
         self.url_map.add(Rule(rule, endpoint=key, **extra))
 
+    def get_full_static_filename(self, filename):
+        return os.path.join(self.default_output_folder,
+                            self.static_folder, filename)
+
+    def get_static_url(self, filename):
+        return '/' + posixpath.join(self.static_folder, filename)
+
     def open_static_file(self, filename, mode='w'):
-        full_filename = os.path.join(self.default_output_folder,
-                                     self.static_folder, filename)
+        full_filename = self.get_full_static_filename(filename)
         folder = os.path.dirname(full_filename)
         if not os.path.isdir(folder):
             os.makedirs(folder)
